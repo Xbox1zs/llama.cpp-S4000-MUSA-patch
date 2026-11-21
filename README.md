@@ -1,3 +1,59 @@
+# llama.cpp-S4000-MUSA-patch
+
+让 llama.cpp 的 MUSA 后端在摩尔线程 **MTT S4000** 上能正常跑、算对的补丁分支。
+
+Patches that make llama.cpp's MUSA backend run correctly on the Moore Threads MTT S4000 (mp_22). Upstream llama.cpp crashes in `test-backend-ops` on this card; this branch is upstream master plus three small MUSA-only fixes.
+
+## 现状（2026-11-21）
+
+上游正式版 b12606（今天发布）在 S4000 上跑 `test-backend-ops`，矩阵乘一开始就崩。更早的版本不崩，但量化矩阵乘会算错。
+
+本分支 = 上游主线 `44c20b1c` + 3 处修复。所有改动都包在 `#if defined(GGML_USE_MUSA)` 里，NVIDIA / AMD 等其他后端的编译结果不变。
+
+| `test-backend-ops test -b MUSA0` | 上游 b12606 | 上游 3cf0325（09-20） | 打上这 3 处修复 |
+|---|---|---|---|
+| MUL_MAT | 跑到 `q5_0, n=8` 崩：`too many resources requested for launch` | 1184 OK / **113 FAIL**（算错、NaN） | 2446 OK / 0 FAIL |
+| MUL_MAT_ID | 第一个用例就崩 | 530 OK / **397 FAIL** | 930 OK / 0 FAIL |
+| SOFT_MAX | 崩：`musaFuncSetAttribute(...) invalid argument` | 通过 | 215 OK / 0 FAIL |
+| 全部 160 个算子（逐个算子跑） | — | — | 14842 OK / 4 FAIL / 0 崩（见"已知问题"） |
+
+最后一列是在 6050b467（2026-10-25）上打这 3 处修复测的（当时第 3 处用的是功能等价的早期写法：申请失败就每次减 4 KB 再试）。在本分支的基线（主线 `44c20b1c`）上的全量测试正在跑，跑完更新这张表。
+
+## 三处修复
+
+1. **量化矩阵乘的分块参数，host 和 device 选的不一样**（`ggml/src/ggml-cuda/mmq.cuh`）
+   host 端按 ampere 那张表算 grid 和共享内存大小，device 端因为 MUSA 被条件编译排除在外，落到了 pascal_older 那张表上。两边对"每个线程块负责几行"理解不一致，结果是批量矩阵乘和大尺寸矩阵乘算错甚至出 NaN。修法：MUSA 的 device 端也用 ampere 表。
+2. **warp 宽度**（`ggml/src/ggml-cuda/ggml-cuda.cu`）
+   S4000 报告 `warpSize = 128`，host 就按 128 发线程块；但所有核函数是按 32 编译的（`__launch_bounds__`），启动时报 `too many resources requested for launch`。修法：MUSA 上固定成 32。旧版本里本来就有这个特判，后来被删了。
+3. **动态共享内存上限**（`ggml/src/ggml-cuda/common.cuh`）
+   MUSA 编译器给**每个**核函数都放了至少 20 字节静态共享内存（代码里没写也有），驱动要求"静态 + 动态 ≤ 73728 字节"，所以直接申请 73728 必然报 `invalid argument`。修法：申请"73728 减去这个核函数的静态用量"。
+
+## 已知问题
+
+- `MUL_MAT_VEC_FUSION`：4 个用例算错（都在 `m=17`），排查中。
+- `SOLVE_TRI`：有一个形状会卡死，排查中。
+- `FLASH_ATTN_EXT`：在 S4000 上全部显示 not supported（上游没给这张卡开）。
+- 只在 S4000（mp_22）上测过，S80（mp_21）和 S5000（mp_31）没测。
+
+## 编译
+
+```sh
+cmake -B build -DGGML_MUSA=ON -DMUSA_ARCHITECTURES=22
+cmake --build build -j
+```
+
+测试环境：AutoDL 租的 1× MTT S4000 48 GB，驱动 5.2.0-server，MUSA SDK 5.2.0。
+
+## 为什么上游没发现
+
+上游的 CI 只在 S5000 的 SDK 容器里**编译** MUSA（`-DMUSA_ARCHITECTURES=31`），不在真卡上跑测试，S4000 这一代不在测试范围里。
+
+## 速度
+
+这些修复只保证算对，还没调速。在 S4000 上单 token 解码时，q8_0 矩阵乘只用到显存带宽的约 37%，IQ 系列只有 7–8%。
+
+---
+
 # llama.cpp
 
 ![llama.cpp](https://raw.githubusercontent.com/ggml-org/llama-brand/refs/heads/master/logo/svg/cover/llama-cpp/cover-llama-cpp-dark.svg)
