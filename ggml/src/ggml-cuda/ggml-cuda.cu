@@ -418,6 +418,10 @@ static ggml_cuda_device_info ggml_cuda_init() {
         int supports_coop_launch = 0;
         CUDA_CHECK(cudaDeviceGetAttribute(&supports_coop_launch, cudaDevAttrCooperativeLaunch, physical_id));
         info.devices[id].supports_cooperative_launch = !!supports_coop_launch;
+#if defined(GGML_USE_MUSA)
+        // musaLaunchCooperativeKernel is still a stub, so grid.sync() can deadlock
+        info.devices[id].supports_cooperative_launch = false;
+#endif // defined(GGML_USE_MUSA)
 
 #if defined(GGML_USE_HIP)
         info.devices[id].smpbo = prop.sharedMemPerBlock;
