@@ -2594,7 +2594,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_q_few(ctx, src0, src1, nullptr, dst);
         return;
     }
-    if (ggml_cuda_should_use_mmq(src0->type, cc, ne11, /*n_experts =*/ 0)) {
+    bool use_mmq = ggml_cuda_should_use_mmq(src0->type, cc, ne11, /*n_experts =*/ 0);
+#if defined(GGML_USE_MUSA)
+    // the muBLAS path needs an f16 conversion of src0, which non-contiguous K/IQ/FP4 quants do not have
+    use_mmq = use_mmq || (ggml_is_quantized(src0->type) && !ggml_is_contiguous(src0) && ggml_get_to_fp16_nc_cuda(src0->type) == nullptr);
+#endif // defined(GGML_USE_MUSA)
+    if (use_mmq) {
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
         return;
     }

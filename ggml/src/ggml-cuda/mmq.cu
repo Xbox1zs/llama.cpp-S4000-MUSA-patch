@@ -525,6 +525,17 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         return false;
     }
 
+    if (GGML_CUDA_CC_IS_MTHREADS(cc)) {
+        // MMQ neither uses the fp16 matrix units nor has a usable small-batch tile on MUSA.
+        // Dense: MMVQ covers n <= 8, and from n = 9 on MMQ is 4-24x slower than dequant + muBLAS.
+        // Expert layer: with the J <= 16 cap MMQ re-reads the expert weights ceil(n/16) times, so it
+        // wins up to ~128 tokens and loses 3.5x to muBLAS at 512 tokens.
+        if (n_experts > 0) {
+            return !fp16_mma_hardware_available(cc) || ne11 <= 128;
+        }
+        return !fp16_mma_hardware_available(cc);
+    }
+
     return (!GGML_CUDA_CC_IS_CDNA(cc)) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
 }
 
