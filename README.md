@@ -1,43 +1,65 @@
 # llama.cpp-S4000-MUSA-patch
 
-让 llama.cpp 的 MUSA 后端在摩尔线程 **MTT S4000** 上能正常跑、算对的补丁分支。
+让 llama.cpp 的 MUSA 后端在摩尔线程 **MTT S4000** 上能正常跑、算对，并且快一些的补丁分支。
 
-Patches that make llama.cpp's MUSA backend run correctly on the Moore Threads MTT S4000 (mp_22). Upstream llama.cpp crashes in `test-backend-ops` on this card; this branch is upstream master plus small MUSA-only fixes.
+Patches that make llama.cpp's MUSA backend run correctly, and faster, on the Moore Threads MTT S4000 (mp_22). Upstream llama.cpp crashes in `test-backend-ops` on this card; this branch is upstream master plus small MUSA-only changes.
 
 ## 现状（2026-11-21）
 
 上游正式版 b12606（今天发布）在 S4000 上跑 `test-backend-ops`，矩阵乘一开始就崩。更早的版本不崩，但量化矩阵乘会算错。
 
-本分支 = 上游主线 `44c20b1c` + 下面几处修复。所有改动都包在 `#if defined(GGML_USE_MUSA)` 里，NVIDIA / AMD 等其他后端的编译结果不变。
+本分支 = 上游主线 `44c20b1c` + 下面的修改。所有改动都包在 `#if defined(GGML_USE_MUSA)` 里，NVIDIA / AMD 等其他后端的编译结果不变。
 
 | `test-backend-ops test -b MUSA0` | 上游 b12606 | 上游 3cf0325（09-20） | 本分支 |
 |---|---|---|---|
-| MUL_MAT | 跑到 `q5_0, n=8` 崩：`too many resources requested for launch` | 1184 OK / **113 FAIL**（算错、NaN） | **2692 OK / 0 FAIL** |
-| MUL_MAT_ID | 第一个用例就崩 | 530 OK / **397 FAIL** | 1065 OK / 2 FAIL（见"已知问题"） |
-| SOFT_MAX | 崩：`musaFuncSetAttribute(...) invalid argument` | 通过 | 209 OK，之后崩（见"已知问题"） |
-| 全部 160 个算子（逐个算子跑，每个限时 15 分钟） | — | — | 14493 OK / 2 FAIL，SOFT_MAX 崩，SOLVE_TRI 卡住 |
+| MUL_MAT | 跑到 `q5_0, n=8` 崩：`too many resources requested for launch` | 1184 OK / **113 FAIL**（算错、NaN） | **2713 OK / 0 FAIL** |
+| MUL_MAT_ID | 第一个用例就崩 | 530 OK / **397 FAIL** | **1067 OK / 0 FAIL** |
+| SOFT_MAX | 崩：`musaFuncSetAttribute(...) invalid argument` | 通过 | **214 OK / 0 FAIL** |
+| 全部 160 个算子（逐个算子跑，每个限时 15 分钟） | — | — | **14533 OK / 0 FAIL**，没有崩溃或卡死 |
 
-计数只算测试用例那一行，不算每个算子末尾的 `Backend MUSA0: OK` 汇总行。FLASH_ATTN_EXT 在这张卡上 5776 条全部是 not supported，一条都没实际执行。
+- 计数只算测试用例那一行，不算每个算子末尾的 `Backend MUSA0: OK` 汇总行。
+- MUL_MAT 里有 21 条是本分支新加的回归测试（批量 17 到 48），上游的测试集里没有这些批量。
+- FLASH_ATTN_EXT 在这张卡上 5776 条全部是 not supported，一条都没实际执行。
+- 全量测试是在最后一处 MMVQ 参数调整之前跑的。那处只改参数，改完后 MUL_MAT 和 MUL_MAT_ID 又完整复测过，全部通过。
 
-## 修复
+## 正确性修复
 
-1. **量化矩阵乘的分块参数，host 和 device 选的不一样**（`ggml/src/ggml-cuda/mmq.cuh`）
-   host 端按 ampere 那张表算 grid 和共享内存大小，device 端因为 MUSA 被条件编译排除在外，落到了 pascal_older 那张表上。两边对"每个线程块负责几行"理解不一致，结果是批量矩阵乘和大尺寸矩阵乘算错甚至出 NaN。修法：MUSA 的 device 端也用 ampere 表。
-   另一种做法是让 host 也选 pascal_older，也试过：预填充更快一些，但 `q2_K` 有一条用例算错，所以没用。
-2. **warp 宽度**（`ggml/src/ggml-cuda/common.cuh`、`ggml-cuda.cu`）
-   S4000 报告 `warpSize = 128`，host 就按 128 发线程块；但所有核函数都是按 32 宽编译的（`__launch_bounds__`），启动时报 `too many resources requested for launch`。
-   修法：新增常量 `GGML_CUDA_MUSA_WARP_SIZE`，设备端的 `ggml_cuda_get_physical_warp_size()` 和 host 端的 `warp_size` 都用它，两边永远一致。S5000 看起来本来就报 32，对它没有影响。上游原来就有一个 MUSA 一律设成 32 的特判，在给 S5000 修问题的 PR #29193 里被删掉了。
-3. **动态共享内存上限**（`ggml/src/ggml-cuda/common.cuh`、`mmid.cu`）
-   MUSA 编译器给**每个**核函数都放了至少 20 字节静态共享内存（代码里没写也有），驱动要求"静态 + 动态 ≤ 73728 字节"，所以按 73728 申请必然报 `invalid argument`。修法：新增 `ggml_cuda_musa_max_dynamic_smem()`，算出"73728 减去这个核函数自己的静态用量"。设置上限时用它，MoE 路由辅助核函数 `mm_ids_helper` 启动时算共享内存大小也用它。
+1. **量化矩阵乘的分块参数，host 和 device 选的不一样**（`mmq.cuh`）
+   host 端按 ampere 那张表算 grid 和共享内存大小，device 端因为 MUSA 被条件编译排除在外，落到了 pascal_older 那张表上。两边对"每个线程块负责几行"理解不一致，批量矩阵乘和大尺寸矩阵乘就会算错，甚至出 NaN。修法：MUSA 的 device 端也用 ampere 表。
+2. **warp 宽度**（`common.cuh`、`ggml-cuda.cu`）
+   S4000 报告 `warpSize = 128`，host 就按 128 发线程块；但核函数都是按 32 宽编译的，启动时报 `too many resources requested for launch`。修法：新增常量 `GGML_CUDA_MUSA_WARP_SIZE`，设备端的 `ggml_cuda_get_physical_warp_size()` 和 host 端的 `warp_size` 都用它，两边永远一致。上游原来有 MUSA 一律设成 32 的特判，在给 S5000 修问题的 PR #29193 里被删掉了。
+3. **动态共享内存上限**（`common.cuh`、`mmid.cu`）
+   MUSA 编译器给**每个**核函数都放了至少 20 字节静态共享内存，驱动要求"静态 + 动态 ≤ 73728 字节"，所以按 73728 申请必然报 `invalid argument`。修法：新增 `ggml_cuda_musa_max_dynamic_smem()`，按"73728 减去这个核函数的静态用量"申请；设置上限和 `mm_ids_helper` 启动时都用它。
+4. **大分块时部分列算错**（`mmq.cu`）
+   批量超过 16 时，MMQ 会选更宽的分块（J=24、32、64），这时 mcc 给核函数用满 254 个寄存器，还溢出 6 KB 到显存，结果一部分列算错（例如 q2_K 在 J=32 时第 16 到 23 列）。修法：MUSA 上把分块宽度限制在 16 以内。
+5. **SOLVE_TRI 算错或卡死**（`solve_tri.cu`）
+   `mublasStrsmBatched` 不会等同一个流上前面的拷贝做完，连着跑时会读到没准备好的数据。修法：调用前同步一次流。注意：这是让 CPU 等待的写法，开启 CUDA 图捕获（`GGML_MUSA_GRAPHS`）时不能用；MUSA 默认不开。
+6. **SOFT_MAX 卡死**（`ggml-cuda.cu`）
+   驱动报告支持协作启动，但 `musaLaunchCooperativeKernel` 还是空壳（SDK 5.2.0 头文件 `cooperative_groups/details/primitives/driver_abi.h` 里写着等驱动实现）。线程块没法保证同时驻留，`grid.sync()` 就会永远等下去。修法：MUSA 上不用协作启动。这个特判同样是在 PR #29193 里被删掉的。
 
-## 已知问题（排查中）
+## 提速
 
-- **MMQ 在批量 17 到 32 时部分列算错**：`q2_K` 选中宽度 32 的分块时，第 16 到 23 列算错；`q4_K` 在 `m=81920, k=256` 时也错。上游的 MUL_MAT 测试批量最大只测到 16，所以全量测试发现不了，是另外补测试用例才查出来的。
-- **MUL_MAT_ID**：2 条 `dup=1` 用例算错（同一个 token 重复选中同一个专家，`q8_0` 和 `q4_0`，n=64），可能和上一条是同一个原因。
-- **SOFT_MAX**：跑完一行 200001 个数的超宽用例后，下一个用例报 `operation aborted`。6050b467 上没有这个问题。
-- **SOLVE_TRI**：走 muBLAS 批量三角求解那条路时，和前面的异步工作之间没有排好顺序。单独跑就对，连着跑就算错或卡住。
-- `FLASH_ATTN_EXT` 在 S4000 上没开。
-- 只在 S4000（mp_22）上测过，S80（mp_21）和 S5000（mp_31）没测。
+速度都是在空闲的 S4000 上测的，矩阵 4096×14336，每组跑两遍取平均。"修改前"指只打了前三个正确性修复的主线，所有批量都走 MMQ。
+
+**预填充：批量大时改走 muBLAS**（`mmq.cu`、`ggml-cuda.cu`）
+- MMQ 在 MUSA 上用不上矩阵单元（那部分是 NVIDIA 专用汇编，被关掉了），muBLAS 能用上。
+- 上游 `ggml_cuda_should_use_mmq()` 里"有 fp16 矩阵单元时，大批量改用 BLAS"这条规则只对 NVIDIA 生效。本分支在 MUSA 上加了对应规则：
+  - 普通矩阵：批量 ≥ 9（超出 MMVQ 的范围）就走 muBLAS；
+  - 专家层（MUL_MAT_ID）：一批 128 个 token 以内仍走 MMQ，超过才走 muBLAS（实测 Qwen3-30B-A3B 的专家形状，批量 64 和 128 时 MMQ 更快，批量 512 时 muBLAS 快 3.5 倍）。
+- 权重不连续存放、又是 K / IQ / FP4 格式时，没有可用的 fp16 解压函数，继续走 MMQ。
+
+| 批量 512 | 修改前 | 本分支 | 提速 |
+|---|---|---|---|
+| q4_0 | 63.9 ms | 1.81 ms | 35 倍 |
+| q8_0 | 60.4 ms | 1.97 ms | 31 倍 |
+| iq2_xxs | 63.6 ms | 2.13 ms | 30 倍 |
+| iq2_xs | 59.1 ms | 2.18 ms | 27 倍 |
+
+**解码：MMVQ 参数**（`mmvq.cu`）
+- 批量 5 到 8：每块从 2 组线程改成 4 组（128 线程，正好是 S4000 一个硬件执行组的宽度）。所有格式都快了 18% 到 45%，例如 q4_K 6.36 ms → 3.52 ms、iq2_xxs 1.10 ms → 0.79 ms。
+- 单 token：每 32 个线程负责一行，同时发出的读请求更多。只对实测变快的格式开启：q4_0、q4_1 −14%，q8_0、nvfp4 −12%，q4_K −10%，q2_K −4%，iq1_m、q5_0、q5_1 −2% 到 −3%，q6_K 专家层 −10%。其余格式（包括 IQ 系列）保持上游配置，因为开启后反而变慢。
+
+**离上限还很远**：单 token 解码时，q8_0 只用到显存带宽的约 43%，q4_0 约 30%，IQ 系列只有 7–8%。要再提速得改核函数本身，光调参数不够。
 
 ## 编译
 
@@ -46,18 +68,11 @@ cmake -B build -DGGML_MUSA=ON -DMUSA_ARCHITECTURES=22
 cmake --build build -j
 ```
 
-测试环境：AutoDL 租的 1× MTT S4000 48 GB，驱动 5.2.0-server，MUSA SDK 5.2.0。
+测试环境：AutoDL 租的 1× MTT S4000 48 GB，驱动 5.2.0-server，MUSA SDK 5.2.0。只在 S4000（mp_22）上测过，S80（mp_21）和 S5000（mp_31）没测。
 
 ## 为什么上游没发现
 
 上游的 CI 只在 S5000 的 SDK 容器里**编译** MUSA（`-DMUSA_ARCHITECTURES=31`），不在真卡上跑测试，S4000 这一代不在测试范围里。S5000 上 MMQ 也算错，上游的处理是在 `ggml_cuda_should_use_mmq()` 里直接对 S5000 关掉 MMQ，没有找根因。
-
-## 速度
-
-这些修复只保证算对，还没调速。目前在 S4000 上（4096×14336 的矩阵）：
-
-- 单 token 解码：q8_0 只用到显存带宽的约 37%，IQ 系列只有 7–8%。
-- 512 个 token 预填充：走 MMQ 的 q8_0、iq2_xxs、iq2_xs 要 58–63 ms；同一张卡上走 muBLAS 的 iq1_m 只要 2.24 ms。原因是 MMQ 在 MUSA 上用不上矩阵单元，而 `ggml_cuda_should_use_mmq()` 里"有 fp16 矩阵单元时，大批量改用 BLAS"这条规则只对 NVIDIA 生效。下一步会试着让 S4000 在大批量时也走 muBLAS。
 
 ---
 
