@@ -411,8 +411,8 @@ static ggml_cuda_device_info ggml_cuda_init() {
         info.devices[id].smpb       = prop.sharedMemPerBlock;
         info.devices[id].warp_size  = prop.warpSize;
 #if defined(GGML_USE_MUSA)
-        // MUSA reports a 128-wide warp, but the kernels are built for ggml_cuda_get_physical_warp_size() == 32
-        info.devices[id].warp_size = 32;
+        // QY2 (MTT S4000) reports warpSize 128, but the kernels are built for GGML_CUDA_MUSA_WARP_SIZE
+        info.devices[id].warp_size = GGML_CUDA_MUSA_WARP_SIZE;
 #endif // GGML_USE_MUSA
 
         int supports_coop_launch = 0;

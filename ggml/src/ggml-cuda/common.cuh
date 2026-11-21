@@ -434,9 +434,16 @@ static bool ggml_cuda_is_aligned(const ggml_tensor * tensor, const size_t alignm
            tensor->nb[3] % alignment == 0;
 }
 
+#if defined(GGML_USE_MUSA)
+// warp size the device code is built for on all MUSA archs; the host warp_size must match it
+#define GGML_CUDA_MUSA_WARP_SIZE 32
+#endif // defined(GGML_USE_MUSA)
+
 static constexpr __device__ int ggml_cuda_get_physical_warp_size() {
 #if defined(GGML_USE_HIP) && (defined(__GFX9__) || defined(__GFX8__))
     return 64;
+#elif defined(GGML_USE_MUSA)
+    return GGML_CUDA_MUSA_WARP_SIZE;
 #else
     return 32;
 #endif // defined(GGML_USE_HIP) && (defined(__GFX9__) || defined(__GFX8__))
