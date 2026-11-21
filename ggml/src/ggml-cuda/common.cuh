@@ -252,21 +252,21 @@ static const char * cu_get_error_str(CUresult err) {
 
 #if !defined(GGML_USE_HIP)
 #if defined(GGML_USE_MUSA)
-// mcc gives every kernel some static shared memory (at least 20 bytes on mp_22 even without
-// __shared__ variables), and the driver rejects a dynamic limit when static + dynamic exceeds
-// sharedMemPerBlockOptin. Requesting the full optin value therefore always fails with
-// 'invalid argument'; clamp the request to what is left after the kernel's static usage.
+// mcc gives every kernel some static shared memory, and static + dynamic must not exceed smpbo
+template <typename F>
+static size_t ggml_cuda_musa_max_dynamic_smem(F * kernel, const size_t smpbo) {
+    musaFuncAttributes attr;
+    CUDA_CHECK(musaFuncGetAttributes(&attr, kernel));
+    return smpbo > attr.sharedSizeBytes ? smpbo - attr.sharedSizeBytes : 0;
+}
+
 #    define CUDA_SET_SHARED_MEMORY_LIMIT(kernel, nbytes)                                                       \
         do {                                                                                                   \
             static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = { false };                         \
             const int   id                                                = ggml_cuda_get_device();            \
             if (!shared_memory_limit_raised[id]) {                                                             \
-                musaFuncAttributes smem_attr;                                                                  \
-                CUDA_CHECK(musaFuncGetAttributes(&smem_attr, kernel));                                         \
-                const size_t smem_optin = ggml_cuda_info().devices[id].smpbo;                                  \
-                const size_t smem_left  = smem_optin > smem_attr.sharedSizeBytes ?                             \
-                                              smem_optin - smem_attr.sharedSizeBytes : 0;                      \
-                const size_t smem_req   = std::min((size_t) (nbytes), smem_left);                              \
+                const size_t smem_max = ggml_cuda_musa_max_dynamic_smem(kernel, ggml_cuda_info().devices[id].smpbo); \
+                const size_t smem_req = std::min((size_t) (nbytes), smem_max);                                 \
                 CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem_req)); \
                 shared_memory_limit_raised[id] = true;                                                         \
             }                                                                                                  \

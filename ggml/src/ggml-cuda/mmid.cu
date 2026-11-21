@@ -247,7 +247,14 @@ static void launch_mm_ids_helper(
 
     const int id = ggml_cuda_get_device();
     const int warp_size = ggml_cuda_info().devices[id].warp_size;
-    const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+    size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+#if defined(GGML_USE_MUSA)
+    static size_t smpbo_kernel[GGML_CUDA_MAX_DEVICES] = { 0 };
+    if (smpbo_kernel[id] == 0) {
+        smpbo_kernel[id] = ggml_cuda_musa_max_dynamic_smem(mm_ids_helper<n_expert_used_template>, smpbo);
+    }
+    smpbo = smpbo_kernel[id];
+#endif // defined(GGML_USE_MUSA)
     CUDA_SET_SHARED_MEMORY_LIMIT(mm_ids_helper<n_expert_used_template>, smpbo);
 
     const uint3 tile_width_fd = init_fastdiv_values(tile_width);
