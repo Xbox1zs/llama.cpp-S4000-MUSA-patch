@@ -468,6 +468,12 @@ static constexpr __device__ int get_mmvq_mmid_max_batch_for_device() {
 
 static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id, bool small_k = false, bool halve_iters = false) {
     if (table_id == MMVQ_PARAMETERS_GENERIC) {
+#if defined(GGML_USE_MUSA)
+        // 4 warps = 128 threads = one full execution group on MUSA
+        if (ncols_dst >= 5 && ncols_dst <= 8) {
+            return 4;
+        }
+#endif // defined(GGML_USE_MUSA)
         switch (ncols_dst) {
             case 1:
             case 2:
@@ -630,6 +636,26 @@ static constexpr __host__ __device__ bool mmvq_two_rows_ncols1(ggml_type type) {
 }
 
 static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
+#if defined(GGML_USE_MUSA)
+    // S4000, one token: one row per warp keeps more loads in flight, but only pays off for these types
+    if (table_id == MMVQ_PARAMETERS_GENERIC && ncols_dst == 1 && !small_k) {
+        switch (type) {
+            case GGML_TYPE_Q4_0:
+            case GGML_TYPE_Q4_1:
+            case GGML_TYPE_Q5_0:
+            case GGML_TYPE_Q5_1:
+            case GGML_TYPE_Q8_0:
+            case GGML_TYPE_Q2_K:
+            case GGML_TYPE_Q4_K:
+            case GGML_TYPE_Q6_K:
+            case GGML_TYPE_IQ1_M:
+            case GGML_TYPE_NVFP4:
+                return nwarps;
+            default:
+                break;
+        }
+    }
+#endif // defined(GGML_USE_MUSA)
     if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN || table_id == MMVQ_PARAMETERS_TURING || table_id == MMVQ_PARAMETERS_GB10 || table_id == MMVQ_PARAMETERS_RDNA1) {
         switch (ncols_dst) {
             case 1:
