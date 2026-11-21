@@ -67,6 +67,10 @@ static void solve_tri_f32_cublas(ggml_backend_cuda_context & ctx,
 
     // Yes, this is necessary, without this we get RMSE errors
     CUBLAS_CHECK(cublasSetMathMode(ctx.cublas_handle(), CUBLAS_DEFAULT_MATH));
+#if defined(GGML_USE_MUSA)
+    // mublasStrsmBatched is not ordered after the copies above on the same stream
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+#endif // defined(GGML_USE_MUSA)
     CUBLAS_CHECK(cublasStrsmBatched(ctx.cublas_handle(), CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
                                     CUBLAS_DIAG_NON_UNIT, k, n, &alpha, A_ptrs_dev, n, X_ptrs_dev, k, total_batches));
 
