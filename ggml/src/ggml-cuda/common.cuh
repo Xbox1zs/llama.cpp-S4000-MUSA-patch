@@ -251,6 +251,27 @@ static const char * cu_get_error_str(CUresult err) {
 #endif
 
 #if !defined(GGML_USE_HIP)
+#if defined(GGML_USE_MUSA)
+// mcc gives every kernel some static shared memory (at least 20 bytes on mp_22 even without
+// __shared__ variables), and the driver rejects a dynamic limit when static + dynamic exceeds
+// sharedMemPerBlockOptin. Requesting the full optin value therefore always fails with
+// 'invalid argument'; clamp the request to what is left after the kernel's static usage.
+#    define CUDA_SET_SHARED_MEMORY_LIMIT(kernel, nbytes)                                                       \
+        do {                                                                                                   \
+            static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = { false };                         \
+            const int   id                                                = ggml_cuda_get_device();            \
+            if (!shared_memory_limit_raised[id]) {                                                             \
+                musaFuncAttributes smem_attr;                                                                  \
+                CUDA_CHECK(musaFuncGetAttributes(&smem_attr, kernel));                                         \
+                const size_t smem_optin = ggml_cuda_info().devices[id].smpbo;                                  \
+                const size_t smem_left  = smem_optin > smem_attr.sharedSizeBytes ?                             \
+                                              smem_optin - smem_attr.sharedSizeBytes : 0;                      \
+                const size_t smem_req   = std::min((size_t) (nbytes), smem_left);                              \
+                CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem_req)); \
+                shared_memory_limit_raised[id] = true;                                                         \
+            }                                                                                                  \
+        } while (0)
+#else
 #    define CUDA_SET_SHARED_MEMORY_LIMIT(kernel, nbytes)                                                       \
         do {                                                                                                   \
             static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = { false };                         \
@@ -260,6 +281,7 @@ static const char * cu_get_error_str(CUresult err) {
                 shared_memory_limit_raised[id] = true;                                                         \
             }                                                                                                  \
         } while (0)
+#endif // GGML_USE_MUSA
 #else
 #    define CUDA_SET_SHARED_MEMORY_LIMIT(kernel, nbytes) \
         do {                                             \
