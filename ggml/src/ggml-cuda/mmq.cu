@@ -138,7 +138,9 @@ static int ggml_cuda_mmq_get_J_best(
     int J_best        = 0;
     int ntiles_J_best = INT_MAX;
 
-    for (int J = 8; J <= 128 && ntiles_J_best > 1; J += 8) {
+    // MUSA: mcc spills heavily for J > 16 and then computes some tile columns wrong
+    const int J_max = GGML_CUDA_CC_IS_MTHREADS(cc) ? 16 : 128;
+    for (int J = 8; J <= J_max && ntiles_J_best > 1; J += 8) {
         const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J, fallback, cc, prec_src1);
         if (config.type == GGML_TYPE_COUNT) {
             continue;
